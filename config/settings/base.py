@@ -221,6 +221,17 @@ ACCOUNT_SIGNUP_FIELDS = ["email*", "password1*"]
 ACCOUNT_EMAIL_VERIFICATION = "none"
 ACCOUNT_EMAIL_SUBJECT_PREFIX = ""
 ACCOUNT_USER_MODEL_USERNAME_FIELD = None
+# Restringir el alta a una allowlist de emails. Sin esto cualquiera puede
+# registrarse (VERIFICATION=none) y se le crea org+workspace.
+# La allowlist por defecto es la del owner; se puede ajustar via env
+# ALLOWED_SIGNUP_EMAILS (lista por comas) si se quiere ampliar/reducir.
+ACCOUNT_ADAPTER = "apps.accounts.adapters.RestrictSignupAccountAdapter"
+ALLOWED_SIGNUP_EMAILS = [
+    e.strip().lower() for e in env(
+        "ALLOWED_SIGNUP_EMAILS",
+        default="cagriostroxd@gmail.com,oscar@mercadodigital.pro",
+    ).split(",") if e.strip()
+]
 LOGIN_REDIRECT_URL = "/"
 ACCOUNT_LOGOUT_REDIRECT_URL = "/accounts/login/"
 

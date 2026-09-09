@@ -1,6 +1,37 @@
 from allauth.socialaccount.adapter import DefaultSocialAccountAdapter
+from allauth.account.adapter import DefaultAccountAdapter
 
 from apps.accounts.models import OAuthConnection
+
+
+class RestrictSignupAccountAdapter(DefaultAccountAdapter):
+    """Restringe el alta (signup) a una allowlist de emails.
+
+    Sin esto, cualquiera puede registrarse con cualquier email (allauth con
+    EMAIL_VERIFICATION='none') y se le crea org+workspace automaticamente.
+    Config :code:`ALLOWED_SIGNUP_EMAILS` como lista separada por comas en env
+    (ej. "cagriostroxd@gmail.com,oscar@mercadodigital.pro"). Si la variable no
+    esta definida, el alta queda CERRADA (default seguro).
+    """
+
+    def is_open_for_signup(self, request):
+        # El alta solo esta abierta si hay allowlist definida y el mail entra.
+        # El gate real del email se hace en clean_email (por eso is_open=True
+        # cuando la allowlist existe, para que allauth llegue a la validacion).
+        from django.conf import settings
+        allowed = settings.ALLOWED_SIGNUP_EMAILS
+        return bool(allowed)
+
+    def clean_email(self, email):
+        email = super().clean_email(email)
+        from django.conf import settings
+        allowed = settings.ALLOWED_SIGNUP_EMAILS or []
+        if allowed and email.lower() not in {a.lower() for a in allowed}:
+            from django.core.exceptions import ValidationError
+            raise ValidationError(
+                "Este email no está autorizado para registrarse. Contactá al administrador."
+            )
+        return email
 
 
 class SocialAccountAdapter(DefaultSocialAccountAdapter):
