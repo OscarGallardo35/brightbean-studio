@@ -129,10 +129,10 @@ class InstagramProvider(SocialProvider):
     @property
     def required_scopes(self) -> list[str]:
         return [
-            "instagram_basic",
-            "instagram_content_publish",
-            "instagram_manage_comments",
-            "instagram_manage_insights",
+            "instagram_business_basic",
+            "instagram_business_content_publish",
+            "instagram_business_manage_comments",
+            "instagram_business_manage_insights",
             "pages_show_list",
             "pages_read_engagement",
         ]

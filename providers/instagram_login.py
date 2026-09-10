@@ -139,7 +139,7 @@ class InstagramLoginProvider(SocialProvider):
             # insights once analytics was switched on — the account had to be
             # reconnected, with nothing but an empty page to say so. Mirrors
             # providers/instagram.py, which has always asked for
-            # instagram_manage_insights on the Facebook-Page path.
+            # instagram_business_manage_insights on the Facebook-Page path.
             "instagram_business_manage_insights",
         ]
 
