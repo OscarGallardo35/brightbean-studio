@@ -5,6 +5,7 @@ import logging
 import zoneinfo
 from datetime import datetime, timedelta
 
+from background_task import background
 from dateutil.relativedelta import relativedelta
 from django.utils import timezone
 
@@ -142,6 +143,20 @@ def generate_recurring_posts():
 
     logger.info("Generated %d recurring posts.", generated_total)
     return generated_total
+
+
+@background(schedule=0)
+def run_recurring_posts_cycle():
+    """Recurring entry point for ``generate_recurring_posts``.
+
+    Registered daily via ``apps.calendar.apps.CalendarConfig`` so the
+    ``process_tasks`` worker generates due recurrences without a separate
+    process. ``generate_recurring_posts`` stays a plain function so it can be
+    unit-tested directly.
+    """
+    generated = generate_recurring_posts()
+    logger.info("Recurring post generation cycle completed - %d post(s) generated", generated)
+    return generated
 
 
 def _compute_recurrence_dates(base_date, frequency, interval, end_date):
