@@ -294,6 +294,42 @@ def retrieve(request, post_id: uuid.UUID):
     return _post_to_response(request, post)
 
 
+@router.get("/", response=list[PostResponse], summary="List posts (optional scheduled date range)")
+def list_posts(request, from_date: str | None = None, to_date: str | None = None, limit: int = 200):
+    """List the workspace's posts, optionally scoped to a ``scheduled_at`` date range.
+
+    Read-only. ``from_date`` / ``to_date`` are inclusive ISO dates
+    (``YYYY-MM-DD``). Mirrors ``_get_workspace_post``'s scoping rule: only
+    posts whose every platform target is in the key's allowlist are
+    returned, so a partially-scoped key can never read a post that has a
+    child for an account it may not touch.
+    """
+    enforce_http_rate_limits(request, is_write=False)
+
+    allowed_ids = list({sa.id for sa in request.api_key.social_accounts.all()})  # type: ignore[attr-defined]
+    workspace_id = request.api_key.workspace_id  # type: ignore[attr-defined]
+    foreign_ids = list(
+        SocialAccount.objects.filter(workspace_id=workspace_id)
+        .exclude(id__in=allowed_ids)
+        .values_list("id", flat=True)
+    )
+
+    qs = (
+        Post.objects.filter(workspace_id=workspace_id)
+        .prefetch_related("platform_posts__social_account")
+        .filter(platform_posts__social_account_id__in=allowed_ids)
+    )
+    if foreign_ids:
+        qs = qs.exclude(platform_posts__social_account_id__in=foreign_ids)
+    if from_date:
+        qs = qs.filter(scheduled_at__date__gte=from_date)
+    if to_date:
+        qs = qs.filter(scheduled_at__date__lte=to_date)
+
+    qs = qs.distinct().order_by("scheduled_at", "created_at")[: max(1, min(limit, 500))]
+    return [_post_to_response(request, post) for post in qs]
+
+
 @router.patch("/{post_id}", response=PostResponse, summary="Update draft fields")
 def update(request, post_id: uuid.UUID, payload: UpdatePostRequest):
     enforce_http_rate_limits(request, is_write=True)
