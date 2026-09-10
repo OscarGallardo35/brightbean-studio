@@ -89,7 +89,7 @@ class SocialProvider(ABC):
         NOT honored by ``instagram_login``, which lists
         ``instagram_business_manage_insights`` in ``required_scopes``
         unconditionally (as ``instagram`` has always done with
-        ``instagram_business_manage_insights``): the grant is frozen at connect time
+        ``instagram_manage_insights``): the grant is frozen at connect time
         while this toggle can flip afterwards, so deferring the scope minted
         tokens that could never read insights once analytics was switched on.
         The cost of that choice is that an Instagram app without the
