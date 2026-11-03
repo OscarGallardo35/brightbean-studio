@@ -35,6 +35,7 @@ from apps.api.middleware import (
 )
 from apps.api.schemas import (
     CreatePostRequest,
+    FacebookPostRequest,
     PostResponse,
     ScheduleRequest,
     UpdatePostRequest,
@@ -46,6 +47,7 @@ from apps.composer.services import (
     transition_platform_post,
 )
 from apps.social_accounts.models import SocialAccount
+from django.utils import timezone as _tz  # type: ignore[import-untyped]
 
 router = Router(tags=["posts"])
 
@@ -132,6 +134,133 @@ def _get_workspace_post(request: HttpRequest, post_id: uuid.UUID) -> Post:
     if not pp_account_ids or not pp_account_ids.issubset(allowed_ids):
         raise Http404()
     return post
+
+
+# ---------------------------------------------------------------------------
+# Facebook-specific endpoint (CRM integration)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/facebook", response={201: PostResponse, 200: PostResponse}, summary="Create and publish a Facebook post from the CRM")
+def facebook_post(request, payload: FacebookPostRequest):
+    """Create a Facebook post from the CRM.
+
+    Receives title, content, and optional image_url. Creates a Post in
+    the workspace, creates the associated PlatformPost for the connected
+    Facebook account, and schedules it for immediate publishing (or at
+    ``scheduled_at`` if provided).
+    """
+    enforce_http_rate_limits(request, is_write=True)
+    _require_perm(request, "create_posts")
+    # Publishing immediately implies publish_directly permission.
+    _require_perm(request, "publish_directly")
+
+    # ---- Find the Facebook SocialAccount in the key's allowlist.
+    api_key = request.api_key
+    allowlist_ids = {sa.id for sa in api_key.social_accounts.all()}
+    facebook_accounts = [
+        sa for sa in api_key.social_accounts.filter(platform="facebook")
+        if sa.id in allowlist_ids
+    ]
+    if not facebook_accounts:
+        raise HttpError(403, "No Facebook account in this key's allowlist.")
+
+    social_account = facebook_accounts[0]
+
+    # Resolve scheduled_at for immediate publish.
+    # If no scheduled_at is given, we set it to "now" so the publisher
+    # picks it up on the next ~15s poll tick.
+    scheduled_at = payload.scheduled_at or _tz.now()
+
+    # ---- Atomic claim-first idempotency (same pattern as create).
+    from apps.api.middleware import (
+        claim_idempotency_slot,
+        finalize_idempotent_response,
+        fingerprint_request,
+        log_audit_entry,
+        release_idempotent_claim,
+    )
+
+    fingerprint = fingerprint_request(request.method or "POST", request.path, payload.dict(by_alias=True))
+    idempotency_key = payload.idempotency_key or request.headers.get("Idempotency-Key") or None
+    try:
+        disposition, replay_status, replay_body = claim_idempotency_slot(
+            api_key=api_key,
+            idempotency_key=idempotency_key,
+            fingerprint=fingerprint,
+        )
+    except ValueError as exc:
+        raise HttpError(422, str(exc)) from exc
+    if disposition == "replay":
+        return replay_status, replay_body
+    if disposition == "in_flight":
+        raise HttpError(
+            409,
+            "An identical request with this idempotency_key is still in flight; retry shortly.",
+        )
+
+    # Platform-quota check.
+    from apps.api.limits import check_platform_quota
+    try:
+        check_platform_quota(social_account)
+    except HttpError:
+        release_idempotent_claim(api_key=api_key, idempotency_key=idempotency_key)
+        raise
+
+    try:
+        platform_overrides = {
+            social_account.id: {
+                "title": payload.title,
+                "caption": payload.content,
+            }
+        }
+
+        # Include image_url in platform_extra if provided.
+        platform_extra = {}
+        if payload.image_url:
+            platform_extra["image_url"] = payload.image_url
+
+        post = create_post(
+            workspace=api_key.workspace,
+            social_account=social_account,
+            caption=payload.content,
+            title=payload.title,
+            status="scheduled",
+            scheduled_at=scheduled_at,
+            platform_overrides=platform_overrides,
+            author=request.user if not request.user.is_anonymous else None,
+        )
+
+        # If image_url was provided, store it in platform_extra.
+        if payload.image_url:
+            from apps.composer.models import PlatformPost
+
+            pp = post.platform_posts.first()
+            if pp:
+                pp.platform_extra = platform_extra
+                pp.save(update_fields=["platform_extra", "updated_at"])
+
+        body = _post_to_response(request, post)
+        status_code = 201
+        log_audit_entry(
+            request,
+            action="post.create.facebook",
+            target_id=post.id,
+            status_code=status_code,
+        )
+        finalize_idempotent_response(
+            api_key=api_key,
+            idempotency_key=idempotency_key,
+            status_code=status_code,
+            body=body.model_dump(mode="json"),
+        )
+    except ValueError as exc:
+        release_idempotent_claim(api_key=api_key, idempotency_key=idempotency_key)
+        raise HttpError(422, str(exc)) from exc
+    except Exception:
+        release_idempotent_claim(api_key=api_key, idempotency_key=idempotency_key)
+        raise
+    return status_code, body
 
 
 # ---------------------------------------------------------------------------

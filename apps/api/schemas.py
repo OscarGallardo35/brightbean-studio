@@ -246,6 +246,44 @@ class ScheduleRequest(Schema):
     scheduled_at: dt.datetime = Field(..., description="UTC timestamp at which the publisher should fire the post.")
 
 
+class FacebookPostRequest(Schema):
+    """Publish a Facebook post directly from the CRM.
+
+    Designed for the CRM → BrightBean Studio → Facebook pipeline.
+    Creates a Post and a PlatformPost for the given Facebook account,
+    then schedules it for immediate publishing (or at ``scheduled_at``
+    if provided).
+    """
+
+    title: str = Field(
+        ...,
+        max_length=255,
+        description="Post title.",
+    )
+    content: str = Field(
+        ...,
+        max_length=10_000,
+        description="Post caption/content body.",
+    )
+    platform: Literal["facebook"] = Field(
+        "facebook",
+        description="Target platform. Always 'facebook' for this endpoint.",
+    )
+    image_url: str | None = Field(
+        None,
+        description="Optional image URL to attach to the post.",
+    )
+    scheduled_at: dt.datetime | None = Field(
+        None,
+        description="UTC timestamp for scheduled publishing. If omitted, the post is published immediately (scheduled_at = now).",
+    )
+    idempotency_key: str | None = Field(
+        None,
+        max_length=128,
+        description="Optional client-chosen retry key. Same key + same body → replay first response.",
+    )
+
+
 # ---------------------------------------------------------------------------
 # /posts — read
 # ---------------------------------------------------------------------------
@@ -291,6 +329,7 @@ class PostResponse(Schema):
     proposed_publish_at: dt.datetime | None
     status: str  # derived aggregate
     platform_posts: list[PlatformPostSummary]
+    url: str = Field("", description="URL to the published post on the platform, if available.")
     created_at: dt.datetime
     updated_at: dt.datetime
 
@@ -335,6 +374,7 @@ class PostResponse(Schema):
             proposed_publish_at=post.proposed_publish_at,
             status=post.status,
             platform_posts=platform_posts,
+            url="",
             created_at=post.created_at,
             updated_at=post.updated_at,
         )
@@ -620,6 +660,163 @@ class PostAnalyticsResponse(Schema):
     title: str
     caption: str
     platform_posts: list[PlatformPostAnalyticsResponse]
+
+
+# ---------------------------------------------------------------------------
+# /inbox — read + reply
+# ---------------------------------------------------------------------------
+
+
+class InboxReplySummary(Schema):
+    """One outbound reply attached to an inbox message."""
+
+    id: uuid.UUID
+    author_name: str = ""
+    body: str
+    platform_reply_id: str = ""
+    sent_at: dt.datetime
+
+    @field_serializer("sent_at")
+    def _serialize_dt(self, value: dt.datetime | None) -> str | None:
+        return _serialize_utc_z(value)
+
+    @classmethod
+    def from_reply(cls, reply) -> InboxReplySummary:
+        author = getattr(reply, "author", None)
+        return cls(
+            id=reply.id,
+            author_name=(getattr(author, "name", "") or getattr(author, "email", "") or "") if author else "",
+            body=reply.body,
+            platform_reply_id=reply.platform_reply_id or "",
+            sent_at=reply.sent_at,
+        )
+
+
+class InboxNoteSummary(Schema):
+    """One team-only internal note on an inbox message."""
+
+    id: uuid.UUID
+    author_name: str = ""
+    body: str
+    created_at: dt.datetime
+
+    @field_serializer("created_at")
+    def _serialize_dt(self, value: dt.datetime | None) -> str | None:
+        return _serialize_utc_z(value)
+
+    @classmethod
+    def from_note(cls, note) -> InboxNoteSummary:
+        author = getattr(note, "author", None)
+        return cls(
+            id=note.id,
+            author_name=(getattr(author, "name", "") or getattr(author, "email", "") or "") if author else "",
+            body=note.body,
+            created_at=note.created_at,
+        )
+
+
+class InboxMessageSummary(Schema):
+    """A single inbox item (DM/comment/mention/review) as exposed to agents."""
+
+    id: uuid.UUID
+    account_id: uuid.UUID
+    platform: str
+    account_name: str = ""
+    message_type: str
+    status: str
+    sentiment: str
+    sender_name: str
+    sender_handle: str = ""
+    sender_avatar_url: str = ""
+    body: str
+    received_at: dt.datetime
+    is_reply_to: uuid.UUID | None = None
+    replies: list[InboxReplySummary] = Field(default_factory=list)
+    internal_notes: list[InboxNoteSummary] = Field(default_factory=list)
+
+    @field_serializer("received_at")
+    def _serialize_dt(self, value: dt.datetime | None) -> str | None:
+        return _serialize_utc_z(value)
+
+    @classmethod
+    def from_message(cls, message, *, include_thread: bool = False) -> InboxMessageSummary:
+        """Serialize an ``InboxMessage``.
+
+        ``include_thread`` pulls in replies + notes; the list view leaves it
+        off so a 32-message feed doesn't fan out into 64 extra queries.
+        Accessors assume the caller prefetched where it matters.
+        """
+        account = message.social_account
+        replies = [InboxReplySummary.from_reply(r) for r in message.replies.all()] if include_thread else []
+        notes = [InboxNoteSummary.from_note(n) for n in message.internal_notes.all()] if include_thread else []
+        return cls(
+            id=message.id,
+            account_id=account.id,
+            platform=account.platform,
+            account_name=account.account_name,
+            message_type=message.message_type,
+            status=message.status,
+            sentiment=message.sentiment,
+            sender_name=message.sender_name,
+            sender_handle=message.sender_handle or "",
+            sender_avatar_url=message.sender_avatar_url or "",
+            body=message.body,
+            received_at=message.received_at,
+            is_reply_to=message.parent_message_id,
+            replies=replies,
+            internal_notes=notes,
+        )
+
+
+class InboxThreadSummary(Schema):
+    """A conversation with one sender, collapsed across its messages.
+
+    A "thread" here is the (``social_account``, ``sender_handle``) pair — the
+    inbox models messages individually, but a human reads DMs as one
+    conversation per person, so the list view groups them and the detail
+    endpoint replays every message plus the team's replies in order.
+    """
+
+    thread_key: str = Field(
+        ...,
+        description="Stable ``<account_id>:<sender_handle>`` identifier. Pass ``account_id`` + ``sender_handle`` back to the thread detail endpoint.",
+    )
+    account_id: uuid.UUID
+    platform: str
+    account_name: str = ""
+    sender_name: str
+    sender_handle: str = ""
+    sender_avatar_url: str = ""
+    message_count: int = Field(..., description="Number of inbound messages in this conversation.")
+    unread_count: int = 0
+    last_message_id: uuid.UUID
+    last_body: str = ""
+    last_received_at: dt.datetime
+    status: str = Field(..., description="Status of the most recent message (unread/open/resolved/archived).")
+    sentiment: str = ""
+
+
+class InboxThreadsResponse(Schema):
+    threads: list[InboxThreadSummary]
+    count: int
+
+
+class InboxThreadDetailResponse(Schema):
+    thread: InboxThreadSummary
+    messages: list[InboxMessageSummary] = Field(
+        default_factory=list,
+        description="Inbound messages oldest → newest, each carrying its replies + internal notes.",
+    )
+
+
+class InboxReplyRequest(Schema):
+    body: str = Field(..., min_length=1, max_length=10_000, description="Text to send back to the sender.")
+
+
+class InboxStatusRequest(Schema):
+    status: Literal["unread", "open", "resolved", "archived"] = Field(
+        ..., description="New status for the message."
+    )
 
 
 # ---------------------------------------------------------------------------
